@@ -42,6 +42,25 @@ def obtain_files(dataset_dir):
 
     return file_paths
 
+def distribute_files(file_paths, n_proc):
+    files_per_node = len(file_paths) // n_proc
+    remaining = len(file_paths) % n_proc # there can be up to (n_proc - 1) remainders
+
+    chunks = []
+    start = 0
+
+    for i in range(n_proc):
+
+        extra = 1 if i < remaining else 0 # take 1 extra file per process, until none remains.
+
+        end = start + files_per_node + extra
+
+        chunks.append(file_paths[start:end])
+
+        start = end
+
+    return chunks
+
 def count_words_in_chunk(query_words, file_paths, case_sensitive=False):
     local_counts= Counter()
     processed_files = len(file_paths)
@@ -90,6 +109,8 @@ def main ():
     dataset_dir = os.path.join(script_dir, "dataset")
     consulta_path = os.path.join(dataset_dir, consulta_name)
 
+    t_global_0 = time.perf_counter() # for global time
+
     # 1. rank 0 reads consulta.txt
     if rank == 0:
         query_words = cargar_consulta(consulta_path, case_sensitive)
@@ -100,36 +121,20 @@ def main ():
     query_words = comm.bcast(query_words, root=0)
 
     if rank == 0:
-
         # 3. rank 0 obtains the list of file_*.txt files
         file_paths = obtain_files(dataset_dir)
 
     # 4. the files are distributed statically among the processes
-        files_per_node = len(file_paths) // (size)
-        remaining = len(file_paths) % (size) # there can be up to (size - 1) remainders
-
-        start = 0
-
-        for i in range(size):
-
-            extra = 1 if i < remaining else 0 # take 1 extra file per process, until none remains.
-
-            end = start + files_per_node + extra
-
-            chunk = file_paths[start:end]
-
-            if i == 0:
-                assigned_files = chunk
-            else:
-                comm.send(chunk, dest=i)
-            start = end    
+        chunks = distribute_files(file_paths, size)
     else:
-        assigned_files = comm.recv(source=0)
+        chunks = None
 
-    comm.barrier()
-    t0 = time.perf_counter() # for global time
+    assigned_files = comm.scatter(chunks, root=0)
+
 
     # 5. each process counts locally the occurrences of the query words in its assigned files
+
+    t_local_0 = time.perf_counter()
 
     try:
         local_counts, processed_files, read_tokens = count_words_in_chunk(
@@ -141,10 +146,12 @@ def main ():
         print("Error:", e)
         return
 
-    t1 = time.perf_counter()
-    local_elapsed = t1 - t0
+    # Local processing time.
+    elapsed = time.perf_counter() - t_local_0
+    print(f"Process {rank}: {len(assigned_files)} files - {elapsed:.6f}s - {read_tokens} tokens")
+   
 
-    print(f"Process {rank}: {len(assigned_files)} files - {local_elapsed:.6f}s - {read_tokens} tokens")
+    
 
 
     # 6. partial results are gathered in rank 0
@@ -160,13 +167,15 @@ def main ():
     total_read_tokens = comm.reduce(read_tokens, op=MPI.SUM, root=0)
     total_processed_files = comm.reduce(processed_files, op=MPI.SUM, root=0)
 
+
     # 7. rank 0 builds the global result and prints the top 10.
     if rank == 0:
-        global_elapsed = time.perf_counter() - t0
         out_path = os.path.join(dataset_dir, output_file)
         save_results_csv(out_path, global_counts)
 
-        print(f"\nTiempo de ejecución: {global_elapsed:.6f} segundos")
+        global_elapsed = time.perf_counter() - t_global_0
+
+        print(f"\nEXECUTION_TIME= {global_elapsed:.6f} segundos")
         print(f"Dataset procesado: {dataset_dir}")
         print(f"Archivo de consulta: {consulta_name}")
         print(f"Archivos procesados: {total_processed_files}")
