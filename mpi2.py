@@ -1,3 +1,4 @@
+# pyrefly: ignore [missing-import]
 from mpi4py import MPI
 import os
 import time
@@ -43,26 +44,6 @@ def obtain_files(dataset_dir):
         sized_files.append(( path, size_bytes ))
 
     return sized_files
-
-def distribute_files_greedy(sized_files, n_processes):
-    """
-    Applies greedy algorithm to balance the weight in the distribution of files.
-    This is still a static implementation.
-    """
-
-    sized_files.sort(key=lambda x: x[1], reverse=True) # sort by size in bytes
-
-    chunks = [[] for _ in range(n_processes)]
-    loads = [0 for _ in range(n_processes)]
-
-    for path, weight in sized_files:
-
-        lightest = loads.index(min(loads))
-
-        chunks[lightest].append(path)
-        loads[lightest] += weight
-
-    return chunks
 
 def count_words_in_chunk(query_words, file_paths, case_sensitive=False):
     local_counts= Counter()
@@ -123,15 +104,15 @@ def main ():
 
     if rank == 0:
         # 3. rank 0 obtains the list of file_*.txt files
-        sized_files = obtain_files(dataset_dir)
+        file_queue:list = obtain_files(dataset_dir)
 
-        # Apply size balancing
-        chunks = distribute_files_greedy(sized_files, size)
-    else:
-        chunks = None
-
+        #4. rank 0 gets trapped in a loop until all files are popped()
+        while(len(file_queue) > 0):
+            #4.1. each loop it checks if it needs to pop (check for free ranks)
+            file_queue.pop
+    
     # 4. the files are distributed statically among the processes
-    assigned_files = comm.scatter(chunks, root=0)
+
 
     comm.barrier()
     t0 = time.perf_counter() # for global time
