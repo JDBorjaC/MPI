@@ -68,7 +68,7 @@ Replace `p` with the number of processes: 1, 2, 4, or 8.
 
 1. Rank 0 reads consulta.txt and broadcasts the query word set to all processes using comm.bcast(), so every process knows what to look for.
 2. Rank 0 lists all file_*.txt files and distributes them statically using integer division — each process gets total_files // p files, and the first total_files % p processes receive one extra file to absorb the remainder. Chunks are sent to each process via comm.send() / comm.recv().
-3. All processes synchronize at a comm.barrier(), then each one starts its local timer and counts word occurrences in its assigned files using a Counter, reading line by line and matching tokens against the query set.
+3. Each process receives its assigned file list via comm.scatter(), immediately starts its local timer with time.perf_counter(), and counts word occurrences in its assigned files using a Counter, reading each file line by line, splitting into tokens, lowercasing them, and incrementing the count for any token found in the query set.
 4. Each process prints its assigned file count, local processing time, and token count — which allows load imbalance to be observed directly.
 5. Partial Counter results are merged back at rank 0 using comm.reduce() with a custom commutative MPI operator that sums counters by key.
 6. Rank 0 computes the total elapsed time, prints the top 10 most frequent words, and saves the full results to mpi1_results.csv.
@@ -229,14 +229,14 @@ Only one worker handles all files when p = 2, negating parallelism.
 | Rank | Run 1 (s) | Run 2 (s) | Run 3 (s) | Avg (s) | Files R1 | Files R2 | Files R3 |
 |:---:|---:|---:|---:|---:|---:|---:|---:|
 | 0 (coord.) | — | — | — | — | — | — | — |
-| 1 | 2.8085 | 2.8352 | 2.8712 | 2.8383 | 425 | 459 | 432 |
+| 1 | 2.8085 | 2.8352 | 2.8712 | 2.8383 | 425 | 423 | 432 |
 | 2 | 2.8086 | 2.8344 | 2.8713 | 2.8381 | 459 | 362 | 402 |
 | 3 | 2.8177 | 2.8357 | 2.8714 | 2.8416 | 385 | 431 | 365 |
 | 4 | 2.8178 | 2.8347 | 2.8699 | 2.8408 | 373 | 422 | 390 |
 | 5 | 2.8179 | 2.8430 | 2.8700 | 2.8436 | 438 | 462 | 461 |
 | 6 | 2.8180 | 2.8431 | 2.8741 | 2.8450 | 450 | 474 | 466 |
 | 7 | 2.8181 | 2.8431 | 2.8703 | 2.8438 | 470 | 426 | 484 |
-| **Total** | **2.8185** | **2.8456** | **2.8768** | **2.8470** | **3,000** | **3,036** | **3,000** |
+| **Total** | **2.8185** | **2.8456** | **2.8768** | **2.8470** | **3,000** | **3,000** | **3,000** |
 
 At p = 8, all worker ranks completed within **< 0.007 s of each other** — a dramatic improvement over Version 1's 0.62 s per-rank spread.
 
