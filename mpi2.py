@@ -1,4 +1,3 @@
-# pyrefly: ignore [missing-import]
 from mpi4py import MPI
 import os
 import time
@@ -89,7 +88,7 @@ def main ():
     dataset_dir = os.path.join(script_dir, "dataset")
     consulta_path = os.path.join(dataset_dir, consulta_name)
 
-    t0 = time.perf_counter()
+    t_global_0 = time.perf_counter()
 
     # rank 0 reads consulta.txt
     if rank == 0:
@@ -148,7 +147,7 @@ def main ():
 
     # 7. rank 0 builds the global result and prints the top 10.
     if rank == 0:
-        global_elapsed = time.perf_counter() - t0
+        global_elapsed = time.perf_counter() - t_global_0
         
         out_path = os.path.join(dataset_dir, output_file)
         save_results_csv(out_path, global_counts)
