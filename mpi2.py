@@ -29,7 +29,7 @@ def obtain_files(dataset_dir):
     """
     Returns a list with the path of every file_*.txt file within the dataset_dir directory.
     """
-    sized_files = []
+    file_paths = []
 
     for fname in os.listdir(dataset_dir):
         if not fname.startswith("file_") or not fname.endswith(".txt"):
@@ -39,37 +39,28 @@ def obtain_files(dataset_dir):
         if not os.path.isfile(path):
             continue
 
-        size_bytes = os.path.getsize(path)
+        file_paths.append(path)
 
-        sized_files.append(( path, size_bytes ))
+    return file_paths
 
-    return sized_files
-
-def count_words_in_chunk(query_words, file_paths, case_sensitive=False):
+def count_words_in_file(query_words, file_path, case_sensitive=False):
     local_counts= Counter()
-    processed_files = len(file_paths)
     read_tokens = 0
 
-    for path in file_paths:
-        with open(path, "r", encoding="utf-8") as f:
-            for line in f:
-                words = line.split()
+    with open(file_path, "r", encoding="utf-8") as f:
+        for line in f:
+            words = line.split()
 
-                if not case_sensitive:
-                    words = [w.lower() for w in words]
+            if not case_sensitive:
+                words = [w.lower() for w in words]
 
-                read_tokens += len(words)
+            read_tokens += len(words)
 
-                for w in words:
-                    if w in query_words:
-                        local_counts[w] += 1
+            for w in words:
+                if w in query_words:
+                    local_counts[w] += 1
 
-    return local_counts, processed_files, read_tokens
-
-def merge_counters(a, b, datatype):
-    for key in b:
-        a[key] = a.get(key, 0) + b[key]
-    return a
+    return local_counts, read_tokens
 
 def save_results_csv(out_path, counts):
     """
@@ -89,75 +80,89 @@ def main ():
     top_n = 10
     output_file = "mpi2_results.csv"
 
+    global_counts = Counter()
+    total_tokens = 0
+    total_files = 0
+    worker_stats = {}
+
     script_dir = os.path.dirname(os.path.abspath(__file__))
     dataset_dir = os.path.join(script_dir, "dataset")
     consulta_path = os.path.join(dataset_dir, consulta_name)
 
-    # 1. rank 0 reads consulta.txt
+    t0 = time.perf_counter()
+
+    # rank 0 reads consulta.txt
     if rank == 0:
         query_words = cargar_consulta(consulta_path, case_sensitive)
     else:
         query_words = None
 
-    # 2. rank 0 broadcasts the query words to all processes using broadcast
+    # rank 0 broadcasts the query words to all processes
     query_words = comm.bcast(query_words, root=0)
 
+
     if rank == 0:
-        # 3. rank 0 obtains the list of file_*.txt files
-        file_queue:list = obtain_files(dataset_dir)
+        file_queue = obtain_files(dataset_dir)
 
-        #4. rank 0 gets trapped in a loop until all files are popped()
-        while(len(file_queue) > 0):
-            #4.1. each loop it checks if it needs to pop (check for free ranks)
-            file_queue.pop
-    
-    # 4. the files are distributed statically among the processes
+        # give an initial file to every worker
+        for i in range(1, size):
+            comm.send(file_queue.pop(), dest=i)
+
+        # main loop: provide to the first worker to finish
+        status = MPI.Status()
+        while file_queue:
+            counts = comm.recv(source=MPI.ANY_SOURCE, status=status)
+            global_counts.update(counts)
+            src = status.Get_source()
+            comm.send(file_queue.pop(), dest=src)
+
+        # end of queue: 
+        for w in range(1, size):
+            counts = comm.recv(source=w)
+            global_counts.update(counts)
+            comm.send(None, dest=w) #STOP
+
+        # gather per-worker stats
+        for w in range(1, size):
+            worker_stats[w] = comm.recv(source=w, tag=1)
 
 
-    comm.barrier()
-    t0 = time.perf_counter() # for global time
+    # workers
+    else:
+        local_tokens = 0
+        local_files = 0
+        local_time = time.perf_counter()
 
-    # 5. each process counts locally the occurrences of the query words in its assigned files
+        while True:
+            path = comm.recv(source=0)
+            if path is None:  # rank 0 is telling to stop working. 
+                break
 
-    try:
-        local_counts, processed_files, read_tokens = count_words_in_chunk(
-            query_words,
-            assigned_files,
-            case_sensitive
-        )
-    except FileNotFoundError as e:
-        print("Error:", e)
-        return
+            counts, tokens = count_words_in_file(query_words, path, case_sensitive)
+            local_tokens += tokens
+            local_files += 1
+            comm.send(counts, dest=0)
 
-    t1 = time.perf_counter()
-    local_elapsed = t1 - t0
-
-    print(f"Process {rank}: {len(assigned_files)} files - {local_elapsed:.6f}s - {read_tokens} tokens")
-
-    # 6. partial results are gathered in rank 0
-
-    # Create a custom op handler that can be used in a MPI.Reduce
-    # commute = True takes advantage of commutativity and associativity
-    # to alter the order of evaluation (otherwise, it'd be ordered by rank).
-    merge_op = MPI.Op.Create(merge_counters, commute=True)
-
-    #Use custom op in reduce to calculate global counts
-    global_counts = comm.reduce(local_counts, op=merge_op, root=0)
-
-    total_read_tokens = comm.reduce(read_tokens, op=MPI.SUM, root=0)
-    total_processed_files = comm.reduce(processed_files, op=MPI.SUM, root=0)
+        local_time = time.perf_counter() - local_time
+        comm.send((local_tokens, local_files, local_time), dest=0, tag = 1)
 
     # 7. rank 0 builds the global result and prints the top 10.
     if rank == 0:
         global_elapsed = time.perf_counter() - t0
+        
         out_path = os.path.join(dataset_dir, output_file)
         save_results_csv(out_path, global_counts)
 
-        print(f"\nTiempo de ejecución: {global_elapsed:.6f} segundos")
+        for w, (tokens, files, t) in worker_stats.items():
+            print(f"  Worker {w}: {files} files - {t:.6f}s - {tokens} tokens")
+            total_files += files
+            total_tokens += tokens
+
+        print(f"\nEXECUTION_TIME= {global_elapsed:.6f} segundos")
         print(f"Dataset procesado: {dataset_dir}")
         print(f"Archivo de consulta: {consulta_name}")
-        print(f"Archivos procesados: {total_processed_files}")
-        print(f"Total de tokens leídos: {total_read_tokens}")
+        print(f"Archivos procesados: {total_files}")
+        print(f"Total de tokens leídos: {total_tokens}")
         print(f"Total de ocurrencias encontradas: {sum(global_counts.values())}")
         print(f"Resultados guardados en: {out_path}\n")
 
